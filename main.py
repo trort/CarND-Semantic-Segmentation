@@ -5,6 +5,7 @@ import helper
 import warnings
 from distutils.version import LooseVersion
 import project_tests as tests
+import time
 
 
 # Check TensorFlow Version
@@ -34,7 +35,15 @@ def load_vgg(sess, vgg_path):
     vgg_layer4_out_tensor_name = 'layer4_out:0'
     vgg_layer7_out_tensor_name = 'layer7_out:0'
     
-    return None, None, None, None, None
+    tf.saved_model.loader.load(sess, [vgg_tag], vgg_path)
+    graph = tf.get_default_graph()
+    image_input = graph.get_tensor_by_name(vgg_input_tensor_name)
+    keep_prob = graph.get_tensor_by_name(vgg_keep_prob_tensor_name)
+    layer3_out = graph.get_tensor_by_name(vgg_layer3_out_tensor_name)
+    layer4_out = graph.get_tensor_by_name(vgg_layer4_out_tensor_name)
+    layer7_out = graph.get_tensor_by_name(vgg_layer7_out_tensor_name)
+    
+    return image_input, keep_prob, layer3_out, layer4_out, layer7_out
 tests.test_load_vgg(load_vgg, tf)
 
 
@@ -48,7 +57,22 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
     :return: The Tensor for the last layer of output
     """
     # TODO: Implement function
-    return None
+    l2_regularizer = tf.contrib.layers.l2_regularizer(1E-3)
+    conv_1x1_layer7 = tf.layers.conv2d(vgg_layer7_out, num_classes, 1, 1, padding="same", kernel_regularizer=l2_regularizer)
+    upsample_layer7 = tf.layers.conv2d_transpose(conv_1x1_layer7, num_classes, 4, (2, 2), padding="same", kernel_regularizer=l2_regularizer)
+
+    layer4_out_scaled = tf.multiply(vgg_layer4_out, 0.01, name='layer4_out_scaled')
+    conv_1x1_layer4 = tf.layers.conv2d(layer4_out_scaled, num_classes, 1, 1, padding="same", kernel_regularizer=l2_regularizer)
+    blended_layer4 = tf.add(conv_1x1_layer4, upsample_layer7)
+    upsample_layer4 = tf.layers.conv2d_transpose(blended_layer4, num_classes, 4, (2, 2), padding="same", kernel_regularizer=l2_regularizer)
+
+    layer3_out_scaled = tf.multiply(vgg_layer3_out, 0.0001, name='layer3_out_scaled')
+    conv_1x1_layer3 = tf.layers.conv2d(layer3_out_scaled, num_classes, 1, 1, padding="same", kernel_regularizer=l2_regularizer)
+    blended_layer3 = tf.add(conv_1x1_layer3, upsample_layer4)
+    upsample_layer3 = tf.layers.conv2d_transpose(blended_layer3, num_classes, 16, (8, 8), padding="same", kernel_regularizer=l2_regularizer)
+
+    # tf.Print(output, [tf.shape(output)])
+    return upsample_layer3
 tests.test_layers(layers)
 
 
@@ -62,7 +86,16 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     :return: Tuple of (logits, train_op, cross_entropy_loss)
     """
     # TODO: Implement function
-    return None, None, None
+    logits = tf.reshape(nn_last_layer, (-1, num_classes))            # no need to reshape actually
+    labels = tf.reshape(correct_label, (-1, num_classes))
+    cross_entropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+                                        logits=nn_last_layer, labels=correct_label))
+    # IMPORTANT: need to manually add regularization loss to total loss
+    reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    total_loss = tf.add_n([cross_entropy_loss] + reg_losses)
+    optimizer = tf.train.AdamOptimizer(learning_rate = learning_rate)
+    train_op = optimizer.minimize(total_loss)
+    return logits, train_op, total_loss
 tests.test_optimize(optimize)
 
 
@@ -82,11 +115,24 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
     :param learning_rate: TF Placeholder for learning rate
     """
     # TODO: Implement function
-    pass
+    for epoch in range(epochs):
+        print("****************** Starting Epoch {} *******************".format(epoch+1))
+        t0 = time.time()
+        for images, labels in get_batches_fn(batch_size):
+            _, loss = sess.run([train_op, cross_entropy_loss],
+                               feed_dict ={input_image: images, correct_label: labels,
+                                           keep_prob: 0.5, learning_rate: 0.0001})
+            print("Current loss is {}".format(loss))
+            ti = time.time()
+            print("{}s has past for this epoch".format(ti - t0))
+        print("Total loss after epoch {} is {}".format(epoch+1, loss))
+
 tests.test_train_nn(train_nn)
 
 
 def run():
+    restart = False
+    train_stage = True
     num_classes = 2
     image_shape = (160, 576)
     data_dir = './data'
@@ -95,6 +141,8 @@ def run():
 
     # Download pretrained vgg model
     helper.maybe_download_pretrained_vgg(data_dir)
+
+    ckpt_prefix = './tmp/'
 
     # OPTIONAL: Train and Inference on the cityscapes dataset instead of the Kitti dataset.
     # You'll need a GPU with at least 10 teraFLOPS to train on.
@@ -109,12 +157,46 @@ def run():
         # OPTIONAL: Augment Images for better results
         #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
 
-        # TODO: Build NN using load_vgg, layers, and optimize function
+        # Build NN using load_vgg, layers, and optimize function
+        image_input, keep_prob, layer3_out, layer4_out, layer7_out = load_vgg(sess, vgg_path)
+        output_layer = layers(layer3_out, layer4_out, layer7_out, num_classes)
+        correct_label = tf.placeholder(tf.float32, [None, None, None, num_classes])
+        learning_rate = tf.placeholder(tf.float32)
+        logits, train_op, total_loss = optimize(output_layer, correct_label, learning_rate, num_classes)
+        mean_iou, iou_update_op = tf.metrics.mean_iou(tf.reshape(correct_label, (-1, num_classes)), tf.nn.softmax(logits), num_classes)
+        print("NN constructed!")
 
-        # TODO: Train NN using the train_nn function
+        # Train NN using the train_nn function
+        sess.run(tf.global_variables_initializer())
+        sess.run(tf.local_variables_initializer())
+        
+        saver = tf.train.Saver(max_to_keep = 5, keep_checkpoint_every_n_hours = 3)
 
-        # TODO: Save inference data using helper.save_inference_samples
-        #  helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
+        latest_checkpoint = tf.train.latest_checkpoint(ckpt_prefix)
+        if latest_checkpoint and not restart:
+            saver.restore(sess, latest_checkpoint)
+            print("Session Restored!")
+        n_epoch = 15
+        batch_size = 20
+        if train_stage:
+            train_nn(sess, n_epoch, batch_size, get_batches_fn, train_op, total_loss, image_input,
+                correct_label, keep_prob, learning_rate)
+            # Save trained NN to continue next time
+            saver.save(sess, ckpt_prefix + 'sess.ckpt')
+            print("Session Saved!")
+
+        # Calculate IOU
+        for images, labels in get_batches_fn(batch_size):
+            sess.run(iou_update_op, feed_dict={image_input: images, correct_label: labels,
+                                               keep_prob: 1.0,})
+        iou_score = sess.run(mean_iou)
+        print("Mean IOU score is: {}".format(iou_score))
+
+        # Save inference data using helper.save_inference_samples
+        runs_dir = './data/test_results'
+        helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, image_input)
+        helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, image_input, on_training_set = True)
+        print("Inference Finished!")
 
         # OPTIONAL: Apply the trained model to a video
 
