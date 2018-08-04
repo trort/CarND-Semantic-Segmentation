@@ -56,7 +56,6 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
     :param num_classes: Number of classes to classify
     :return: The Tensor for the last layer of output
     """
-    # TODO: Implement function
     l2_regularizer = tf.contrib.layers.l2_regularizer(1E-3)
     conv_1x1_layer7 = tf.layers.conv2d(vgg_layer7_out, num_classes, 1, 1, padding="same", kernel_regularizer=l2_regularizer)
     upsample_layer7 = tf.layers.conv2d_transpose(conv_1x1_layer7, num_classes, 4, (2, 2), padding="same", kernel_regularizer=l2_regularizer)
@@ -85,7 +84,6 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     :param num_classes: Number of classes to classify
     :return: Tuple of (logits, train_op, cross_entropy_loss)
     """
-    # TODO: Implement function
     logits = tf.reshape(nn_last_layer, (-1, num_classes))            # no need to reshape actually
     labels = tf.reshape(correct_label, (-1, num_classes))
     cross_entropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
@@ -114,18 +112,19 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
     :param keep_prob: TF Placeholder for dropout keep probability
     :param learning_rate: TF Placeholder for learning rate
     """
-    # TODO: Implement function
     for epoch in range(epochs):
         print("****************** Starting Epoch {} *******************".format(epoch+1))
         t0 = time.time()
+        losses = []
         for images, labels in get_batches_fn(batch_size):
             _, loss = sess.run([train_op, cross_entropy_loss],
                                feed_dict ={input_image: images, correct_label: labels,
                                            keep_prob: 0.5, learning_rate: 0.0001})
-            print("Current loss is {}".format(loss))
+            print("Current batch loss is {}".format(loss))
+            losses.append(loss)
             ti = time.time()
-            print("{}s has past for this epoch".format(ti - t0))
-        print("Total loss after epoch {} is {}".format(epoch+1, loss))
+            print("{} seconds have past for this epoch".format(ti - t0))
+        print("Average loss for epoch {} is {}".format(epoch+1, sum(losses) / len(losses)))
 
 tests.test_train_nn(train_nn)
 
@@ -164,6 +163,7 @@ def run():
         learning_rate = tf.placeholder(tf.float32)
         logits, train_op, total_loss = optimize(output_layer, correct_label, learning_rate, num_classes)
         mean_iou, iou_update_op = tf.metrics.mean_iou(tf.reshape(correct_label, (-1, num_classes)), tf.nn.softmax(logits), num_classes)
+        mean_accuracy, accuracy_update_op = tf.metrics.accuracy(tf.reshape(correct_label, (-1, num_classes)), tf.nn.softmax(logits))
         print("NN constructed!")
 
         # Train NN using the train_nn function
@@ -176,8 +176,8 @@ def run():
         if latest_checkpoint and not restart:
             saver.restore(sess, latest_checkpoint)
             print("Session Restored!")
-        n_epoch = 15
-        batch_size = 20
+        n_epoch = 25
+        batch_size = 10
         if train_stage:
             train_nn(sess, n_epoch, batch_size, get_batches_fn, train_op, total_loss, image_input,
                 correct_label, keep_prob, learning_rate)
@@ -185,15 +185,15 @@ def run():
             saver.save(sess, ckpt_prefix + 'sess.ckpt')
             print("Session Saved!")
 
-        # Calculate IOU
+        # Calculate IOU # ref: http://ronny.rest/blog/post_2017_09_11_tf_metrics/
         for images, labels in get_batches_fn(batch_size):
-            sess.run(iou_update_op, feed_dict={image_input: images, correct_label: labels,
+            sess.run([iou_update_op, accuracy_update_op], feed_dict={image_input: images, correct_label: labels,
                                                keep_prob: 1.0,})
         iou_score = sess.run(mean_iou)
-        print("Mean IOU score is: {}".format(iou_score))
+        accuracy_score = sess.run(mean_accuracy)
+        print("Mean IOU score is: {}, mean accuracy is: {}.".format(iou_score, accuracy_score))
 
         # Save inference data using helper.save_inference_samples
-        runs_dir = './data/test_results'
         helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, image_input)
         helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, image_input, on_training_set = True)
         print("Inference Finished!")
